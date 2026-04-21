@@ -1,0 +1,261 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Prisma Schema — TeamChat
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// User
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  displayName     String
+  avatarUrl       String?
+  passwordHash    String
+  statusText      String   @default("")
+  isPlatformAdmin Boolean  @default(false)
+  createdAt       DateTime @default(now())
+
+  workspaceMembers WorkspaceMember[]
+  channelMembers   ChannelMember[]
+  messages         Message[]
+  notifications    Notification[]
+  callParticipants CallParticipant[]
+  devices          UserDevice[]
+  reactions        Reaction[]
+
+  @@index([email])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Workspace
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Workspace {
+  id        String   @id @default(uuid())
+  slug      String   @unique
+  name      String
+  ownerId   String
+  plan      String   @default("free")
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  members  WorkspaceMember[]
+  channels Channel[]
+
+  @@index([slug])
+  @@index([ownerId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WorkspaceMember
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorkspaceMember {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        String   @default("member")
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Channel
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Channel {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String
+  isPrivate   Boolean  @default(false)
+  isDm        Boolean  @default(false)
+  type        String   @default("text")
+  createdAt   DateTime @default(now())
+
+  workspace Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  members   ChannelMember[]
+  messages  Message[]
+  calls     Call[]
+
+  @@unique([workspaceId, name])
+  @@index([workspaceId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ChannelMember
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ChannelMember {
+  id        String   @id @default(uuid())
+  channelId String
+  userId    String
+  joinedAt  DateTime @default(now())
+
+  channel Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+  @@index([userId])
+  @@index([channelId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Message
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Message {
+  id        String    @id @default(uuid())
+  channelId String
+  senderId  String
+  parentId  String?
+  content   String
+  metadata  Json      @default("{}")
+  isEdited  Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  editedAt  DateTime?
+
+  /// PostgreSQL tsvector column — populated by trigger, not by Prisma.
+  searchVec Unsupported("tsvector")?
+
+  channel     Channel      @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  sender      User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  parent      Message?     @relation("ThreadReplies", fields: [parentId], references: [id], onDelete: SetNull)
+  replies     Message[]    @relation("ThreadReplies")
+  reactions   Reaction[]
+  attachments Attachment[]
+
+  @@index([channelId])
+  @@index([senderId])
+  @@index([parentId])
+  /// Compound index for cursor-based pagination: newest-first per channel.
+  @@index([channelId, createdAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Reaction
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Reaction {
+  id        String @id @default(uuid())
+  messageId String
+  userId    String
+  emoji     String
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId, emoji])
+  @@index([messageId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attachment
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Attachment {
+  id         String   @id @default(uuid())
+  messageId  String?
+  uploaderId String
+  filename   String
+  mimeType   String
+  sizeBytes  Int
+  s3Key      String   @unique
+  status     String   @default("pending")
+  createdAt  DateTime @default(now())
+
+  message Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+
+  @@index([messageId])
+  @@index([uploaderId])
+  @@index([status, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Call
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Call {
+  id          String    @id @default(uuid())
+  channelId   String
+  initiatorId String
+  state       String    @default("ringing")
+  startedAt   DateTime  @default(now())
+  endedAt     DateTime?
+
+  channel      Channel          @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  participants CallParticipant[]
+
+  @@index([channelId])
+  @@index([state])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CallParticipant
+// ─────────────────────────────────────────────────────────────────────────────
+
+model CallParticipant {
+  id       String    @id @default(uuid())
+  callId   String
+  userId   String
+  joinedAt DateTime  @default(now())
+  leftAt   DateTime?
+
+  call Call @relation(fields: [callId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([callId, userId])
+  @@index([callId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Notification
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(uuid())
+  userId    String
+  type      String
+  payload   Json
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, isRead])
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// UserDevice
+// ─────────────────────────────────────────────────────────────────────────────
+
+model UserDevice {
+  id         String   @id @default(uuid())
+  userId     String
+  deviceId   String   @unique
+  platform   String
+  pushToken  String?
+  webPushSub Json?
+  lastSeenAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
